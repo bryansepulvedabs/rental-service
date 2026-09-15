@@ -3,6 +3,7 @@ package rent_a_car_bryan.rentalservice.service;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import rent_a_car_bryan.rentalservice.dto.CarInfoDTO;
 import rent_a_car_bryan.rentalservice.dto.RentalRequestDTO;
@@ -10,6 +11,9 @@ import rent_a_car_bryan.rentalservice.dto.RentalResponseDTO;
 import rent_a_car_bryan.rentalservice.dto.UserInfoDTO;
 import rent_a_car_bryan.rentalservice.entity.RentalEntity;
 import rent_a_car_bryan.rentalservice.entity.RentalState;
+import rent_a_car_bryan.rentalservice.exception.InvalidRentalException;
+import rent_a_car_bryan.rentalservice.exception.ResourceNotFoundException;
+import rent_a_car_bryan.rentalservice.exception.ServiceCommunicationException;
 import rent_a_car_bryan.rentalservice.repository.RentalRepository;
 
 import java.time.temporal.ChronoUnit;
@@ -34,7 +38,7 @@ public class RentalService {
 
         long days = ChronoUnit.DAYS.between(dto.getStartDate(), dto.getEndDate());
         if (days <= 0) {
-            throw new RuntimeException("La fecha de término debe ser posterior a la de inicio");
+            throw new InvalidRentalException("La fecha de término debe ser posterior a la de inicio");
         }
 
         RentalEntity entity = new RentalEntity();
@@ -94,31 +98,48 @@ public class RentalService {
 
     private RentalEntity findEntityById(Long id) {
         return rentalRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Arriendo no encontrado con id : " + id));
+                .orElseThrow(() -> new ResourceNotFoundException("Arriendo no encontrado con id : " + id));
     }
 
     private CarInfoDTO fetchCar(Long carId) {
-        CarInfoDTO car = restTemplate.getForObject(
-                carServiceUrl + "/api/cars/{id}", CarInfoDTO.class, carId);
-        if (car == null) {
-            throw new RuntimeException("Auto no encontrado con id : " + carId);
+        try {
+            CarInfoDTO car = restTemplate.getForObject(
+                    carServiceUrl + "/api/cars/{id}", CarInfoDTO.class, carId);
+            if (car == null) {
+                throw new ResourceNotFoundException("Auto no encontrado con id: " + carId);
+            }
+            return car;
+        } catch (ResourceNotFoundException e) {
+            throw e;
+        } catch (RestClientException e) {
+            throw new ServiceCommunicationException("Error al comunicarse con car-service: " + e.getMessage());
         }
-        return car;
     }
 
     private UserInfoDTO fetchUser(Long userId) {
-        UserInfoDTO user = restTemplate.getForObject(
-                userServiceUrl + "/api/users/{id}", UserInfoDTO.class, userId);
-        if (user == null) {
-            throw new RuntimeException("Usuario no encontrado con id : " + userId);
+        try {
+            UserInfoDTO user = restTemplate.getForObject(
+                    userServiceUrl + "/api/users/{id}", UserInfoDTO.class, userId);
+            if (user == null) {
+                throw new ResourceNotFoundException("Usuario no encontrado con id: " + userId);
+            }
+            return user;
+        } catch (ResourceNotFoundException e) {
+            throw e;
+        } catch (RestClientException e) {
+            throw new ServiceCommunicationException("Error al comunicarse con user-service: " + e.getMessage());
         }
-        return user;
     }
 
     private void updateCarAvailability(Long carId, boolean available) {
-        restTemplate.patchForObject(
-                carServiceUrl + "/api/cars/{id}/availability?available={available}",
-                null, Void.class, carId, available);
+        try {
+            restTemplate.patchForObject(
+                    carServiceUrl + "/api/cars/{id}/availability?available={available}",
+                    null, Void.class, carId, available);
+        } catch (RestClientException e) {
+            throw new ServiceCommunicationException(
+                    "Error al actualizar disponibilidad del auto " + carId + ": " + e.getMessage());
+        }
     }
 
     private RentalResponseDTO toResponseDTO(RentalEntity entity, CarInfoDTO car, UserInfoDTO user) {

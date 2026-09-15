@@ -1,7 +1,12 @@
 # Etapa 1: build del jar con Maven
 FROM maven:3.9-eclipse-temurin-17 AS build
 WORKDIR /app
+
+# Dependencias primero: esta capa se cachea mientras el pom no cambie
 COPY pom.xml .
+RUN mvn dependency:go-offline -B
+
+# Código después: cambiar código ya no re-descarga dependencias
 COPY src ./src
 RUN mvn clean package -DskipTests
 
