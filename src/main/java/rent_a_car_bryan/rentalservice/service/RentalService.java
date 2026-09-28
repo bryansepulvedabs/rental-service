@@ -2,6 +2,9 @@ package rent_a_car_bryan.rentalservice.service;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
@@ -15,6 +18,7 @@ import rent_a_car_bryan.rentalservice.exception.InvalidRentalException;
 import rent_a_car_bryan.rentalservice.exception.ResourceNotFoundException;
 import rent_a_car_bryan.rentalservice.exception.ServiceCommunicationException;
 import rent_a_car_bryan.rentalservice.repository.RentalRepository;
+import rent_a_car_bryan.rentalservice.security.ServiceTokenProvider;
 
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -25,6 +29,7 @@ public class RentalService {
 
     private final RentalRepository rentalRepository;
     private final RestTemplate restTemplate;
+    private final ServiceTokenProvider serviceTokenProvider;
 
     @Value("${services.car-service.url}")
     private String carServiceUrl;
@@ -62,7 +67,7 @@ public class RentalService {
     }
 
     public List<RentalResponseDTO> getAllRentals() {
-        return rentalRepository.findAll().stream()
+        return rentalRepository.findAllByOrderByIdAsc().stream()
                 .map(entity -> toResponseDTO(entity, fetchCar(entity.getCarId()), fetchUser(entity.getUserId())))
                 .toList();
     }
@@ -133,9 +138,18 @@ public class RentalService {
 
     private void updateCarAvailability(Long carId, boolean available) {
         try {
-            restTemplate.patchForObject(
+            // Este PATCH está protegido con rol ADMIN en car-service, así que rental-service
+            // se autentica con un token de servicio de corta duración, no con el de un usuario.
+            HttpHeaders headers = new HttpHeaders();
+            headers.setBearerAuth(serviceTokenProvider.generateServiceToken());
+            HttpEntity<Void> request = new HttpEntity<>(headers);
+
+            restTemplate.exchange(
                     carServiceUrl + "/api/cars/{id}/availability?available={available}",
-                    null, Void.class, carId, available);
+                    HttpMethod.PATCH,
+                    request,
+                    Void.class,
+                    carId, available);
         } catch (RestClientException e) {
             throw new ServiceCommunicationException(
                     "Error al actualizar disponibilidad del auto " + carId + ": " + e.getMessage());

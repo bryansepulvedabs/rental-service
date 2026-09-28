@@ -12,4 +12,7 @@ public interface RentalRepository extends JpaRepository<RentalEntity, Long> {
     List<RentalEntity> findByCarId(Long carId);
 
     List<RentalEntity> findByUserId(Long userId);
+
+    List<RentalEntity> findAllByOrderByIdAsc();
+
 }
