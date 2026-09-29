@@ -10,9 +10,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.Date;
 
 // Genera un JWT de muy corta duración para que rental-service se autentique
-// ante car-service en llamadas internas (ej: actualizar disponibilidad de un auto).
-// No hay un usuario detrás: es el servicio identificándose a sí mismo con rol ADMIN,
-// firmado con el mismo JWT_SECRET compartido que valida car-service.
+// ante car-service y user-service en llamadas internas (actualizar la disponibilidad
+// de un auto, consultar un usuario por id).
+// No hay un usuario detrás: es el servicio identificándose a sí mismo con el rol SERVICE,
+// que solo habilita esas dos operaciones (no es ADMIN), firmado con el JWT_SECRET compartido.
 @Component
 public class ServiceTokenProvider {
 
@@ -28,7 +29,7 @@ public class ServiceTokenProvider {
         Date now = new Date();
         return Jwts.builder()
                 .subject("rental-service")
-                .claim("role", "ADMIN")
+                .claim("role", "SERVICE")
                 .issuedAt(now)
                 .expiration(new Date(now.getTime() + EXPIRATION_MS))
                 .signWith(key)

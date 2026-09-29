@@ -5,6 +5,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
@@ -14,6 +17,7 @@ import rent_a_car_bryan.rentalservice.dto.RentalResponseDTO;
 import rent_a_car_bryan.rentalservice.dto.UserInfoDTO;
 import rent_a_car_bryan.rentalservice.entity.RentalEntity;
 import rent_a_car_bryan.rentalservice.entity.RentalState;
+import rent_a_car_bryan.rentalservice.exception.ForbiddenOperationException;
 import rent_a_car_bryan.rentalservice.exception.InvalidRentalException;
 import rent_a_car_bryan.rentalservice.exception.ResourceNotFoundException;
 import rent_a_car_bryan.rentalservice.exception.ServiceCommunicationException;
@@ -38,6 +42,8 @@ public class RentalService {
     private String userServiceUrl;
 
     public RentalResponseDTO createRental(RentalRequestDTO dto) {
+        resolveUserId(dto);
+
         CarInfoDTO car = fetchCar(dto.getCarId());
         UserInfoDTO user = fetchUser(dto.getUserId());
 
@@ -86,6 +92,8 @@ public class RentalService {
 
     public RentalResponseDTO updateRentalStatus(Long id, RentalState newStatus) {
         RentalEntity entity = findEntityById(id);
+        enforceStatusChangeAllowed(entity, newStatus);
+
         entity.setStatus(newStatus);
         RentalEntity updated = rentalRepository.save(entity);
 
@@ -99,6 +107,46 @@ public class RentalService {
     public void deleteRental(Long id) {
         RentalEntity entity = findEntityById(id);
         rentalRepository.deleteById(entity.getId());
+    }
+
+    // Si quien crea el arriendo es un CLIENT, el arriendo es para sí mismo: se ignora
+    // cualquier userId que haya llegado en el body, y se usa el id del token (evita que
+    // alguien reserve a nombre de otra persona). Si es personal (ADMIN/EMPLOYEE), debe
+    // indicar explícitamente el cliente — por ejemplo, cuando llega al mostrador.
+    private void resolveUserId(RentalRequestDTO dto) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        boolean isStaff = auth.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .anyMatch(a -> a.equals("ROLE_ADMIN") || a.equals("ROLE_EMPLOYEE"));
+
+        if (isStaff) {
+            if (dto.getUserId() == null) {
+                throw new InvalidRentalException("Debes indicar el cliente para crear el arriendo");
+            }
+        } else {
+            dto.setUserId(Long.valueOf(auth.getName()));
+        }
+    }
+
+    // El personal (ADMIN/EMPLOYEE) puede cambiar a cualquier estado. Un cliente solo puede
+    // cancelar SU PROPIO arriendo, y solo mientras esté PENDIENTE — una vez retirado el auto
+    // (ACTIVO), la cancelación la gestiona el mostrador, no el propio cliente.
+    private void enforceStatusChangeAllowed(RentalEntity entity, RentalState newStatus) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        boolean isStaff = auth.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .anyMatch(a -> a.equals("ROLE_ADMIN") || a.equals("ROLE_EMPLOYEE"));
+        if (isStaff) {
+            return;
+        }
+
+        boolean isOwner = auth.getName().equals(String.valueOf(entity.getUserId()));
+        boolean isSelfCancelOfPending = newStatus == RentalState.CANCELADO
+                && entity.getStatus() == RentalState.PENDIENTE;
+
+        if (!isOwner || !isSelfCancelOfPending) {
+            throw new ForbiddenOperationException("No puedes modificar este arriendo");
+        }
     }
 
     private RentalEntity findEntityById(Long id) {
@@ -123,8 +171,12 @@ public class RentalService {
 
     private UserInfoDTO fetchUser(Long userId) {
         try {
-            UserInfoDTO user = restTemplate.getForObject(
-                    userServiceUrl + "/api/users/{id}", UserInfoDTO.class, userId);
+            UserInfoDTO user = restTemplate.exchange(
+                    userServiceUrl + "/api/users/{id}",
+                    HttpMethod.GET,
+                    serviceRequest(),
+                    UserInfoDTO.class,
+                    userId).getBody();
             if (user == null) {
                 throw new ResourceNotFoundException("Usuario no encontrado con id: " + userId);
             }
@@ -138,22 +190,24 @@ public class RentalService {
 
     private void updateCarAvailability(Long carId, boolean available) {
         try {
-            // Este PATCH está protegido con rol ADMIN en car-service, así que rental-service
-            // se autentica con un token de servicio de corta duración, no con el de un usuario.
-            HttpHeaders headers = new HttpHeaders();
-            headers.setBearerAuth(serviceTokenProvider.generateServiceToken());
-            HttpEntity<Void> request = new HttpEntity<>(headers);
-
             restTemplate.exchange(
                     carServiceUrl + "/api/cars/{id}/availability?available={available}",
                     HttpMethod.PATCH,
-                    request,
+                    serviceRequest(),
                     Void.class,
                     carId, available);
         } catch (RestClientException e) {
             throw new ServiceCommunicationException(
                     "Error al actualizar disponibilidad del auto " + carId + ": " + e.getMessage());
         }
+    }
+
+    // Las llamadas internas a otros servicios no llevan el token del usuario: rental-service
+    // se identifica a sí mismo con un token de servicio de corta duración (rol SERVICE).
+    private HttpEntity<Void> serviceRequest() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(serviceTokenProvider.generateServiceToken());
+        return new HttpEntity<>(headers);
     }
 
     private RentalResponseDTO toResponseDTO(RentalEntity entity, CarInfoDTO car, UserInfoDTO user) {
