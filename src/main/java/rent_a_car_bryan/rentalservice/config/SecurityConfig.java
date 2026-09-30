@@ -29,6 +29,11 @@ public class SecurityConfig {
                 // Sin token (o vencido) responde 401; con token pero sin permiso, 403
                 .exceptionHandling(ex -> ex.authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
                 .authorizeHttpRequests(auth -> auth
+                        // Consultas de disponibilidad: publicas, igual que el catalogo de autos.
+                        // Solo dicen si un auto esta libre en un rango, no exponen datos de arriendos.
+                        // Van ANTES que el resto para que no caigan en la regla general.
+                        .requestMatchers(HttpMethod.GET, "/api/rentals/availability").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/rentals/occupied").permitAll()
                         // Crear un arriendo exige sesión: si es CLIENT, se arrienda a sí mismo (el service
                         // ignora el userId del body); si es personal, indica para qué cliente es
                         .requestMatchers(HttpMethod.POST, "/api/rentals").authenticated()

@@ -1,6 +1,7 @@
 package rent_a_car_bryan.rentalservice.controller;
 
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -9,6 +10,7 @@ import rent_a_car_bryan.rentalservice.dto.RentalResponseDTO;
 import rent_a_car_bryan.rentalservice.entity.RentalState;
 import rent_a_car_bryan.rentalservice.service.RentalService;
 
+import java.time.LocalDate;
 import java.util.List;
 
 @RestController
@@ -21,6 +23,23 @@ public class RentalController {
     @PostMapping
     public ResponseEntity<RentalResponseDTO> createRental(@RequestBody RentalRequestDTO dto) {
         return ResponseEntity.status(HttpStatus.CREATED).body(rentalService.createRental(dto));
+    }
+
+    // Disponibilidad de un auto en un rango concreto. Publico: lo usa el catalogo.
+    @GetMapping("/availability")
+    public ResponseEntity<Boolean> isCarAvailable(
+            @RequestParam Long carId,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate) {
+        return ResponseEntity.ok(rentalService.isCarAvailable(carId, startDate, endDate));
+    }
+
+    // Ids de autos ocupados en el rango, para filtrar el catalogo de una sola llamada.
+    @GetMapping("/occupied")
+    public ResponseEntity<List<Long>> getOccupiedCarIds(
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate) {
+        return ResponseEntity.ok(rentalService.getOccupiedCarIds(startDate, endDate));
     }
 
     @GetMapping

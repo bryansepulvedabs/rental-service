@@ -9,6 +9,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import rent_a_car_bryan.rentalservice.dto.CarInfoDTO;
@@ -24,12 +25,17 @@ import rent_a_car_bryan.rentalservice.exception.ServiceCommunicationException;
 import rent_a_car_bryan.rentalservice.repository.RentalRepository;
 import rent_a_car_bryan.rentalservice.security.ServiceTokenProvider;
 
+import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 
 @Service
 @RequiredArgsConstructor
 public class RentalService {
+
+    // Estados que ocupan el auto. FINALIZADO y CANCELADO liberan las fechas.
+    private static final List<RentalState> BLOCKING_STATES =
+            List.of(RentalState.PENDIENTE, RentalState.ACTIVO);
 
     private final RentalRepository rentalRepository;
     private final RestTemplate restTemplate;
@@ -43,14 +49,21 @@ public class RentalService {
 
     public RentalResponseDTO createRental(RentalRequestDTO dto) {
         resolveUserId(dto);
+        validateDates(dto.getStartDate(), dto.getEndDate());
 
+        // El auto ya no se marca como no disponible: la disponibilidad depende de las
+        // fechas, asi que se valida que no haya otro arriendo solapado en ese periodo.
+        if (rentalRepository.existsOverlapping(
+                dto.getCarId(), dto.getStartDate(), dto.getEndDate(), BLOCKING_STATES)) {
+            throw new InvalidRentalException("El auto ya está arrendado entre esas fechas");
+        }
+
+        // Acá sí, estricto: no se puede crear un arriendo sobre un auto o un cliente
+        // que no existe (o que fue dado de baja).
         CarInfoDTO car = fetchCar(dto.getCarId());
         UserInfoDTO user = fetchUser(dto.getUserId());
 
         long days = ChronoUnit.DAYS.between(dto.getStartDate(), dto.getEndDate());
-        if (days <= 0) {
-            throw new InvalidRentalException("La fecha de término debe ser posterior a la de inicio");
-        }
 
         RentalEntity entity = new RentalEntity();
         entity.setCarId(dto.getCarId());
@@ -62,31 +75,42 @@ public class RentalService {
 
         RentalEntity saved = rentalRepository.save(entity);
 
-        updateCarAvailability(dto.getCarId(), false);
-
         return toResponseDTO(saved, car, user);
+    }
+
+    // Consulta puntual: sirve para el detalle de un auto y para validar el formulario
+    // antes de enviarlo.
+    public boolean isCarAvailable(Long carId, LocalDate startDate, LocalDate endDate) {
+        validateDates(startDate, endDate);
+        return !rentalRepository.existsOverlapping(carId, startDate, endDate, BLOCKING_STATES);
+    }
+
+    // Ids ocupados en el rango, para que el catalogo filtre de una sola llamada.
+    public List<Long> getOccupiedCarIds(LocalDate startDate, LocalDate endDate) {
+        validateDates(startDate, endDate);
+        return rentalRepository.findOccupiedCarIds(startDate, endDate, BLOCKING_STATES);
     }
 
     public RentalResponseDTO getRentalById(Long id) {
         RentalEntity entity = findEntityById(id);
-        return toResponseDTO(entity, fetchCar(entity.getCarId()), fetchUser(entity.getUserId()));
+        return toResponseDTO(entity);
     }
 
     public List<RentalResponseDTO> getAllRentals() {
         return rentalRepository.findAllByOrderByIdAsc().stream()
-                .map(entity -> toResponseDTO(entity, fetchCar(entity.getCarId()), fetchUser(entity.getUserId())))
+                .map(this::toResponseDTO)
                 .toList();
     }
 
     public List<RentalResponseDTO> getRentalsByCarId(Long carId) {
         return rentalRepository.findByCarId(carId).stream()
-                .map(entity -> toResponseDTO(entity, fetchCar(entity.getCarId()), fetchUser(entity.getUserId())))
+                .map(this::toResponseDTO)
                 .toList();
     }
 
     public List<RentalResponseDTO> getRentalsByUserId(Long userId) {
         return rentalRepository.findByUserId(userId).stream()
-                .map(entity -> toResponseDTO(entity, fetchCar(entity.getCarId()), fetchUser(entity.getUserId())))
+                .map(this::toResponseDTO)
                 .toList();
     }
 
@@ -94,19 +118,37 @@ public class RentalService {
         RentalEntity entity = findEntityById(id);
         enforceStatusChangeAllowed(entity, newStatus);
 
+        // Reactivar un arriendo liberado (cancelado o finalizado) vuelve a ocupar sus
+        // fechas, asi que hay que revisar que en el intertanto no se hayan tomado.
+        boolean wasReleased = !BLOCKING_STATES.contains(entity.getStatus());
+        if (wasReleased && BLOCKING_STATES.contains(newStatus)
+                && rentalRepository.existsOverlappingExcluding(
+                entity.getCarId(), entity.getStartDate(), entity.getEndDate(),
+                BLOCKING_STATES, entity.getId())) {
+            throw new InvalidRentalException(
+                    "No se puede reactivar: el auto ya fue arrendado en esas fechas");
+        }
+
         entity.setStatus(newStatus);
         RentalEntity updated = rentalRepository.save(entity);
 
-        if (newStatus == RentalState.FINALIZADO || newStatus == RentalState.CANCELADO) {
-            updateCarAvailability(updated.getCarId(), true);
-        }
-
-        return toResponseDTO(updated, fetchCar(updated.getCarId()), fetchUser(updated.getUserId()));
+        return toResponseDTO(updated);
     }
 
+    // Borrado logico: @SQLDelete en RentalEntity convierte esto en un UPDATE.
+    // La fila queda en la base y desaparece de todas las consultas.
     public void deleteRental(Long id) {
         RentalEntity entity = findEntityById(id);
         rentalRepository.deleteById(entity.getId());
+    }
+
+    private void validateDates(LocalDate startDate, LocalDate endDate) {
+        if (startDate == null || endDate == null) {
+            throw new InvalidRentalException("Debes indicar la fecha de inicio y la de término");
+        }
+        if (!endDate.isAfter(startDate)) {
+            throw new InvalidRentalException("La fecha de término debe ser posterior a la de inicio");
+        }
     }
 
     // Si quien crea el arriendo es un CLIENT, el arriendo es para sí mismo: se ignora
@@ -154,16 +196,22 @@ public class RentalService {
                 .orElseThrow(() -> new ResourceNotFoundException("Arriendo no encontrado con id : " + id));
     }
 
+    // ---- Llamadas estrictas: 404 del otro servicio = error para quien pidió ----
+
     private CarInfoDTO fetchCar(Long carId) {
         try {
-            CarInfoDTO car = restTemplate.getForObject(
-                    carServiceUrl + "/api/cars/{id}", CarInfoDTO.class, carId);
+            CarInfoDTO car = restTemplate.exchange(
+                    carServiceUrl + "/api/cars/{id}",
+                    HttpMethod.GET,
+                    serviceRequest(),
+                    CarInfoDTO.class,
+                    carId).getBody();
             if (car == null) {
                 throw new ResourceNotFoundException("Auto no encontrado con id: " + carId);
             }
             return car;
-        } catch (ResourceNotFoundException e) {
-            throw e;
+        } catch (HttpClientErrorException.NotFound e) {
+            throw new ResourceNotFoundException("Auto no encontrado con id: " + carId);
         } catch (RestClientException e) {
             throw new ServiceCommunicationException("Error al comunicarse con car-service: " + e.getMessage());
         }
@@ -181,24 +229,42 @@ public class RentalService {
                 throw new ResourceNotFoundException("Usuario no encontrado con id: " + userId);
             }
             return user;
-        } catch (ResourceNotFoundException e) {
-            throw e;
+        } catch (HttpClientErrorException.NotFound e) {
+            throw new ResourceNotFoundException("Usuario no encontrado con id: " + userId);
         } catch (RestClientException e) {
             throw new ServiceCommunicationException("Error al comunicarse con user-service: " + e.getMessage());
         }
     }
 
-    private void updateCarAvailability(Long carId, boolean available) {
+    // ---- Llamadas tolerantes: para MOSTRAR historial ----
+    // Un auto o un cliente dado de baja no puede hacer caer el listado completo de
+    // arriendos. Las fechas, el estado y el total viven en RentalEntity, asi que el
+    // historial sigue siendo correcto aunque el auto ya no exista.
+
+    private CarInfoDTO fetchCarOrPlaceholder(Long carId) {
         try {
-            restTemplate.exchange(
-                    carServiceUrl + "/api/cars/{id}/availability?available={available}",
-                    HttpMethod.PATCH,
-                    serviceRequest(),
-                    Void.class,
-                    carId, available);
-        } catch (RestClientException e) {
-            throw new ServiceCommunicationException(
-                    "Error al actualizar disponibilidad del auto " + carId + ": " + e.getMessage());
+            return fetchCar(carId);
+        } catch (ResourceNotFoundException e) {
+            CarInfoDTO placeholder = new CarInfoDTO();
+            placeholder.setId(carId);
+            placeholder.setBrand("Auto dado de baja");
+            placeholder.setModel("");
+            placeholder.setLicensePlate("—");
+            placeholder.setDailyRate(0L);
+            return placeholder;
+        }
+    }
+
+    private UserInfoDTO fetchUserOrPlaceholder(Long userId) {
+        try {
+            return fetchUser(userId);
+        } catch (ResourceNotFoundException e) {
+            UserInfoDTO placeholder = new UserInfoDTO();
+            placeholder.setId(userId);
+            placeholder.setFirstName("Cliente dado de baja");
+            placeholder.setLastName("");
+            placeholder.setEmail("—");
+            return placeholder;
         }
     }
 
@@ -208,6 +274,13 @@ public class RentalService {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(serviceTokenProvider.generateServiceToken());
         return new HttpEntity<>(headers);
+    }
+
+    // Version para mostrar: resuelve auto y cliente tolerando que ya no existan
+    private RentalResponseDTO toResponseDTO(RentalEntity entity) {
+        return toResponseDTO(entity,
+                fetchCarOrPlaceholder(entity.getCarId()),
+                fetchUserOrPlaceholder(entity.getUserId()));
     }
 
     private RentalResponseDTO toResponseDTO(RentalEntity entity, CarInfoDTO car, UserInfoDTO user) {
