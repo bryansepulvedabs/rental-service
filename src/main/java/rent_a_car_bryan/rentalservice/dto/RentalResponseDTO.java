@@ -14,4 +14,5 @@ public class RentalResponseDTO {
     private LocalDate endDate;
     private RentalState status;
     private Long totalPrice;
+    private Boolean deleted;
 }

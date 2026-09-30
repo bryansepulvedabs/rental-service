@@ -9,6 +9,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
@@ -33,7 +34,6 @@ import java.util.List;
 @RequiredArgsConstructor
 public class RentalService {
 
-    // Estados que ocupan el auto. FINALIZADO y CANCELADO liberan las fechas.
     private static final List<RentalState> BLOCKING_STATES =
             List.of(RentalState.PENDIENTE, RentalState.ACTIVO);
 
@@ -51,15 +51,12 @@ public class RentalService {
         resolveUserId(dto);
         validateDates(dto.getStartDate(), dto.getEndDate());
 
-        // El auto ya no se marca como no disponible: la disponibilidad depende de las
-        // fechas, asi que se valida que no haya otro arriendo solapado en ese periodo.
         if (rentalRepository.existsOverlapping(
                 dto.getCarId(), dto.getStartDate(), dto.getEndDate(), BLOCKING_STATES)) {
             throw new InvalidRentalException("El auto ya está arrendado entre esas fechas");
         }
 
-        // Acá sí, estricto: no se puede crear un arriendo sobre un auto o un cliente
-        // que no existe (o que fue dado de baja).
+        // Estricto: no se crea un arriendo sobre un auto o cliente que no existe o fue dado de baja
         CarInfoDTO car = fetchCar(dto.getCarId());
         UserInfoDTO user = fetchUser(dto.getUserId());
 
@@ -78,14 +75,11 @@ public class RentalService {
         return toResponseDTO(saved, car, user);
     }
 
-    // Consulta puntual: sirve para el detalle de un auto y para validar el formulario
-    // antes de enviarlo.
     public boolean isCarAvailable(Long carId, LocalDate startDate, LocalDate endDate) {
         validateDates(startDate, endDate);
         return !rentalRepository.existsOverlapping(carId, startDate, endDate, BLOCKING_STATES);
     }
 
-    // Ids ocupados en el rango, para que el catalogo filtre de una sola llamada.
     public List<Long> getOccupiedCarIds(LocalDate startDate, LocalDate endDate) {
         validateDates(startDate, endDate);
         return rentalRepository.findOccupiedCarIds(startDate, endDate, BLOCKING_STATES);
@@ -96,8 +90,23 @@ public class RentalService {
         return toResponseDTO(entity);
     }
 
+    // Ficha para el admin: incluye arriendos dados de baja, para revisar su historial.
+    // La respuesta trae deleted = true cuando corresponde.
+    public RentalResponseDTO getRentalByIdIncludingDeleted(Long id) {
+        RentalEntity entity = rentalRepository.findAnyById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Arriendo no encontrado con id : " + id));
+        return toResponseDTO(entity);
+    }
+
     public List<RentalResponseDTO> getAllRentals() {
         return rentalRepository.findAllByOrderByIdAsc().stream()
+                .map(this::toResponseDTO)
+                .toList();
+    }
+
+    // Arriendos dados de baja, para que el admin pueda reactivarlos
+    public List<RentalResponseDTO> getAllDeletedRentals() {
+        return rentalRepository.findAllDeleted().stream()
                 .map(this::toResponseDTO)
                 .toList();
     }
@@ -118,8 +127,6 @@ public class RentalService {
         RentalEntity entity = findEntityById(id);
         enforceStatusChangeAllowed(entity, newStatus);
 
-        // Reactivar un arriendo liberado (cancelado o finalizado) vuelve a ocupar sus
-        // fechas, asi que hay que revisar que en el intertanto no se hayan tomado.
         boolean wasReleased = !BLOCKING_STATES.contains(entity.getStatus());
         if (wasReleased && BLOCKING_STATES.contains(newStatus)
                 && rentalRepository.existsOverlappingExcluding(
@@ -135,11 +142,31 @@ public class RentalService {
         return toResponseDTO(updated);
     }
 
-    // Borrado logico: @SQLDelete en RentalEntity convierte esto en un UPDATE.
-    // La fila queda en la base y desaparece de todas las consultas.
     public void deleteRental(Long id) {
         RentalEntity entity = findEntityById(id);
         rentalRepository.deleteById(entity.getId());
+    }
+
+    // Reactivar un arriendo dado de baja. Si en el intertanto se creo otro arriendo
+    // sobre el mismo auto en fechas solapadas y este esta en PENDIENTE o ACTIVO, no
+    // se permite: quedarian dos reservas simultaneas del mismo auto.
+    @Transactional
+    public RentalResponseDTO restoreRental(Long id) {
+        RentalEntity deleted = rentalRepository.findDeletedById(id)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Arriendo no encontrado o no estaba dado de baja: " + id));
+
+        if (BLOCKING_STATES.contains(deleted.getStatus())
+                && rentalRepository.existsOverlappingExcluding(
+                deleted.getCarId(), deleted.getStartDate(), deleted.getEndDate(),
+                BLOCKING_STATES, deleted.getId())) {
+            throw new InvalidRentalException(
+                    "No se puede reactivar: el auto ya fue arrendado en esas fechas");
+        }
+
+        rentalRepository.restoreById(id);
+        deleted.setDeleted(false);
+        return toResponseDTO(deleted);
     }
 
     private void validateDates(LocalDate startDate, LocalDate endDate) {
@@ -151,10 +178,6 @@ public class RentalService {
         }
     }
 
-    // Si quien crea el arriendo es un CLIENT, el arriendo es para sí mismo: se ignora
-    // cualquier userId que haya llegado en el body, y se usa el id del token (evita que
-    // alguien reserve a nombre de otra persona). Si es personal (ADMIN/EMPLOYEE), debe
-    // indicar explícitamente el cliente — por ejemplo, cuando llega al mostrador.
     private void resolveUserId(RentalRequestDTO dto) {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         boolean isStaff = auth.getAuthorities().stream()
@@ -170,9 +193,6 @@ public class RentalService {
         }
     }
 
-    // El personal (ADMIN/EMPLOYEE) puede cambiar a cualquier estado. Un cliente solo puede
-    // cancelar SU PROPIO arriendo, y solo mientras esté PENDIENTE — una vez retirado el auto
-    // (ACTIVO), la cancelación la gestiona el mostrador, no el propio cliente.
     private void enforceStatusChangeAllowed(RentalEntity entity, RentalState newStatus) {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         boolean isStaff = auth.getAuthorities().stream()
@@ -196,7 +216,7 @@ public class RentalService {
                 .orElseThrow(() -> new ResourceNotFoundException("Arriendo no encontrado con id : " + id));
     }
 
-    // ---- Llamadas estrictas: 404 del otro servicio = error para quien pidió ----
+    // ---- Llamadas estrictas: para CREAR. Un auto o cliente dado de baja = 404 ----
 
     private CarInfoDTO fetchCar(Long carId) {
         try {
@@ -236,47 +256,69 @@ public class RentalService {
         }
     }
 
-    // ---- Llamadas tolerantes: para MOSTRAR historial ----
-    // Un auto o un cliente dado de baja no puede hacer caer el listado completo de
-    // arriendos. Las fechas, el estado y el total viven en RentalEntity, asi que el
-    // historial sigue siendo correcto aunque el auto ya no exista.
+    // ---- Llamadas para MOSTRAR historial ----
+    // Usan la ficha de admin del otro servicio, que incluye autos y clientes dados de
+    // baja: asi el historial conserva los datos reales (marca, patente, nombre...) en
+    // vez de un marcador. Solo si el registro ya no existe del todo se cae al marcador.
+    // Requiere que car-service y user-service permitan el rol SERVICE en esa ruta.
 
     private CarInfoDTO fetchCarOrPlaceholder(Long carId) {
         try {
-            return fetchCar(carId);
-        } catch (ResourceNotFoundException e) {
-            CarInfoDTO placeholder = new CarInfoDTO();
-            placeholder.setId(carId);
-            placeholder.setBrand("Auto dado de baja");
-            placeholder.setModel("");
-            placeholder.setLicensePlate("—");
-            placeholder.setDailyRate(0L);
-            return placeholder;
+            CarInfoDTO car = restTemplate.exchange(
+                    carServiceUrl + "/api/cars/admin/{id}",
+                    HttpMethod.GET,
+                    serviceRequest(),
+                    CarInfoDTO.class,
+                    carId).getBody();
+            return car != null ? car : carPlaceholder(carId);
+        } catch (HttpClientErrorException.NotFound e) {
+            return carPlaceholder(carId);
+        } catch (RestClientException e) {
+            throw new ServiceCommunicationException("Error al comunicarse con car-service: " + e.getMessage());
         }
     }
 
     private UserInfoDTO fetchUserOrPlaceholder(Long userId) {
         try {
-            return fetchUser(userId);
-        } catch (ResourceNotFoundException e) {
-            UserInfoDTO placeholder = new UserInfoDTO();
-            placeholder.setId(userId);
-            placeholder.setFirstName("Cliente dado de baja");
-            placeholder.setLastName("");
-            placeholder.setEmail("—");
-            return placeholder;
+            UserInfoDTO user = restTemplate.exchange(
+                    userServiceUrl + "/api/users/admin/{id}",
+                    HttpMethod.GET,
+                    serviceRequest(),
+                    UserInfoDTO.class,
+                    userId).getBody();
+            return user != null ? user : userPlaceholder(userId);
+        } catch (HttpClientErrorException.NotFound e) {
+            return userPlaceholder(userId);
+        } catch (RestClientException e) {
+            throw new ServiceCommunicationException("Error al comunicarse con user-service: " + e.getMessage());
         }
     }
 
-    // Las llamadas internas a otros servicios no llevan el token del usuario: rental-service
-    // se identifica a sí mismo con un token de servicio de corta duración (rol SERVICE).
+    private CarInfoDTO carPlaceholder(Long carId) {
+        CarInfoDTO placeholder = new CarInfoDTO();
+        placeholder.setId(carId);
+        placeholder.setBrand("Auto no disponible");
+        placeholder.setModel("");
+        placeholder.setLicensePlate("—");
+        placeholder.setDailyRate(0L);
+        return placeholder;
+    }
+
+    private UserInfoDTO userPlaceholder(Long userId) {
+        UserInfoDTO placeholder = new UserInfoDTO();
+        placeholder.setId(userId);
+        placeholder.setFirstName("Cliente no disponible");
+        placeholder.setLastName("");
+        placeholder.setEmail("—");
+        return placeholder;
+    }
+
     private HttpEntity<Void> serviceRequest() {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(serviceTokenProvider.generateServiceToken());
         return new HttpEntity<>(headers);
     }
 
-    // Version para mostrar: resuelve auto y cliente tolerando que ya no existan
     private RentalResponseDTO toResponseDTO(RentalEntity entity) {
         return toResponseDTO(entity,
                 fetchCarOrPlaceholder(entity.getCarId()),
@@ -292,6 +334,7 @@ public class RentalService {
         dto.setEndDate(entity.getEndDate());
         dto.setStatus(entity.getStatus());
         dto.setTotalPrice(entity.getTotalPrice());
+        dto.setDeleted(Boolean.TRUE.equals(entity.getDeleted()));
         return dto;
     }
 }

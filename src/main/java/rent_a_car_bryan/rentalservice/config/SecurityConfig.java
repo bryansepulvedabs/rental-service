@@ -26,24 +26,23 @@ public class SecurityConfig {
         http
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                // Sin token (o vencido) responde 401; con token pero sin permiso, 403
                 .exceptionHandling(ex -> ex.authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
                 .authorizeHttpRequests(auth -> auth
                         // Consultas de disponibilidad: publicas, igual que el catalogo de autos.
-                        // Solo dicen si un auto esta libre en un rango, no exponen datos de arriendos.
-                        // Van ANTES que el resto para que no caigan en la regla general.
                         .requestMatchers(HttpMethod.GET, "/api/rentals/availability").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/rentals/occupied").permitAll()
-                        // Crear un arriendo exige sesión: si es CLIENT, se arrienda a sí mismo (el service
-                        // ignora el userId del body); si es personal, indica para qué cliente es
+                        // Eliminados: lista, ficha y reactivar, solo ADMIN. Van ANTES que las reglas
+                        // generales, si no matchea primero la que deja pasar a EMPLOYEE.
+                        .requestMatchers(HttpMethod.GET, "/api/rentals/deleted").hasRole("ADMIN")
+                        .requestMatchers(HttpMethod.GET, "/api/rentals/admin/*").hasRole("ADMIN")
+                        .requestMatchers(HttpMethod.PATCH, "/api/rentals/*/restore").hasRole("ADMIN")
+                        // Crear un arriendo exige sesión
                         .requestMatchers(HttpMethod.POST, "/api/rentals").authenticated()
                         // Arriendos de un usuario: el propio usuario, o el personal (ADMIN/EMPLOYEE)
                         .requestMatchers(HttpMethod.GET, "/api/rentals/user/{userId}")
                         .access((authentication, context) -> new AuthorizationDecision(
                                 isStaffOrOwner(authentication.get(), context.getVariables().get("userId"))))
                         // Cambiar estado: cualquier sesión puede intentarlo; el service decide si corresponde
-                        // (el personal puede cualquier cambio; un cliente solo puede cancelar SU propio
-                        // arriendo mientras esté PENDIENTE — ver RentalService.enforceStatusChangeAllowed)
                         .requestMatchers(HttpMethod.PATCH, "/api/rentals/*/status").authenticated()
                         // Todo lo demás (listado, por id, por auto, eliminar): ADMIN o EMPLOYEE
                         .anyRequest().hasAnyRole("ADMIN", "EMPLOYEE")
@@ -52,7 +51,6 @@ public class SecurityConfig {
         return http.build();
     }
 
-    // El "name" de la autenticación es el subject del JWT, es decir, el id del usuario (ver JwtService en user-service)
     private static boolean isStaffOrOwner(Authentication auth, String userId) {
         if (auth == null) {
             return false;

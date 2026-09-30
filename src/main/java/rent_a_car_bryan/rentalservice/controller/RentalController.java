@@ -25,7 +25,6 @@ public class RentalController {
         return ResponseEntity.status(HttpStatus.CREATED).body(rentalService.createRental(dto));
     }
 
-    // Disponibilidad de un auto en un rango concreto. Publico: lo usa el catalogo.
     @GetMapping("/availability")
     public ResponseEntity<Boolean> isCarAvailable(
             @RequestParam Long carId,
@@ -34,7 +33,6 @@ public class RentalController {
         return ResponseEntity.ok(rentalService.isCarAvailable(carId, startDate, endDate));
     }
 
-    // Ids de autos ocupados en el rango, para filtrar el catalogo de una sola llamada.
     @GetMapping("/occupied")
     public ResponseEntity<List<Long>> getOccupiedCarIds(
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
@@ -47,9 +45,21 @@ public class RentalController {
         return ResponseEntity.ok(rentalService.getAllRentals());
     }
 
+    // Arriendos dados de baja: solo ADMIN
+    @GetMapping("/deleted")
+    public ResponseEntity<List<RentalResponseDTO>> getAllDeletedRentals() {
+        return ResponseEntity.ok(rentalService.getAllDeletedRentals());
+    }
+
     @GetMapping("/{id}")
     public ResponseEntity<RentalResponseDTO> getRentalById(@PathVariable Long id) {
         return ResponseEntity.ok(rentalService.getRentalById(id));
+    }
+
+    // Ficha incluyendo eliminados, para revisar su historial: solo ADMIN
+    @GetMapping("/admin/{id}")
+    public ResponseEntity<RentalResponseDTO> getRentalByIdIncludingDeleted(@PathVariable Long id) {
+        return ResponseEntity.ok(rentalService.getRentalByIdIncludingDeleted(id));
     }
 
     @GetMapping("/car/{carId}")
@@ -73,5 +83,11 @@ public class RentalController {
     public ResponseEntity<Void> deleteRental(@PathVariable Long id) {
         rentalService.deleteRental(id);
         return ResponseEntity.noContent().build();
+    }
+
+    // Reactivar un arriendo dado de baja: solo ADMIN
+    @PatchMapping("/{id}/restore")
+    public ResponseEntity<RentalResponseDTO> restore(@PathVariable Long id){
+        return ResponseEntity.ok(rentalService.restoreRental(id));
     }
 }

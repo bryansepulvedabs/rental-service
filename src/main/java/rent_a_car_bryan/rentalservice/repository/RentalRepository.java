@@ -1,6 +1,7 @@
 package rent_a_car_bryan.rentalservice.repository;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -10,6 +11,7 @@ import rent_a_car_bryan.rentalservice.entity.RentalState;
 import java.time.LocalDate;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 
 @Repository
 public interface RentalRepository extends JpaRepository<RentalEntity, Long> {
@@ -63,4 +65,19 @@ public interface RentalRepository extends JpaRepository<RentalEntity, Long> {
     List<Long> findOccupiedCarIds(@Param("startDate") LocalDate startDate,
                                   @Param("endDate") LocalDate endDate,
                                   @Param("statuses") Collection<RentalState> statuses);
+
+    // Consultas nativas: saltan @SQLRestriction, es la unica forma de ver los borrados.
+    @Query(value = "SELECT * FROM rentals WHERE deleted = true ORDER BY id", nativeQuery = true)
+    List<RentalEntity> findAllDeleted();
+
+    @Query(value = "SELECT * FROM rentals WHERE id = :id AND deleted = true", nativeQuery = true)
+    Optional<RentalEntity> findDeletedById(Long id);
+
+    // Ficha del admin: el arriendo exista vigente o dado de baja.
+    @Query(value = "SELECT * FROM rentals WHERE id = :id", nativeQuery = true)
+    Optional<RentalEntity> findAnyById(Long id);
+
+    @Modifying
+    @Query(value = "UPDATE rentals SET deleted = false WHERE id = :id AND deleted = true", nativeQuery = true)
+    int restoreById(Long id);
 }
