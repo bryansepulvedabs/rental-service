@@ -6,6 +6,7 @@ import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import rent_a_car_bryan.rentalservice.dto.FinishRentalRequestDTO;
 import rent_a_car_bryan.rentalservice.dto.RentalDatesRequestDTO;
 import rent_a_car_bryan.rentalservice.dto.RentalRequestDTO;
 import rent_a_car_bryan.rentalservice.dto.RentalResponseDTO;
@@ -79,6 +80,15 @@ public class RentalController {
             @PathVariable Long id,
             @RequestParam RentalState newStatus) {
         return ResponseEntity.ok(rentalService.updateRentalStatus(id, newStatus));
+    }
+
+    // Devolucion del auto: finaliza el arriendo registrando el kilometraje final, que
+    // tambien actualiza el kilometraje del auto. Solo personal (anyRequest del SecurityConfig).
+    @PatchMapping("/{id}/finish")
+    public ResponseEntity<RentalResponseDTO> finishRental(
+            @PathVariable Long id,
+            @Valid @RequestBody FinishRentalRequestDTO dto) {
+        return ResponseEntity.ok(rentalService.finishRental(id, dto));
     }
 
     // Editar las fechas de un arriendo vigente: solo personal (ADMIN o EMPLOYEE),

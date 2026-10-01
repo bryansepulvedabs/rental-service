@@ -14,6 +14,7 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import rent_a_car_bryan.rentalservice.dto.CarInfoDTO;
+import rent_a_car_bryan.rentalservice.dto.FinishRentalRequestDTO;
 import rent_a_car_bryan.rentalservice.dto.RentalDatesRequestDTO;
 import rent_a_car_bryan.rentalservice.dto.RentalRequestDTO;
 import rent_a_car_bryan.rentalservice.dto.RentalResponseDTO;
@@ -142,6 +143,11 @@ public class RentalService {
         // Primero quien puede (403) y despues si la transicion tiene sentido (400)
         enforceStatusChangeAllowed(entity, newStatus);
         enforceValidTransition(entity.getStatus(), newStatus);
+        // Finalizar exige registrar el kilometraje final: tiene su propio metodo (finishRental)
+        if (newStatus == RentalState.FINALIZADO) {
+            throw new InvalidRentalException(
+                    "Para finalizar un arriendo hay que registrar la devolución con el kilometraje final");
+        }
 
         entity.setStatus(newStatus);
         RentalEntity updated = rentalRepository.save(entity);
@@ -201,6 +207,35 @@ public class RentalService {
                     "No se puede pasar un arriendo de " + from.name().toLowerCase()
                             + " a " + to.name().toLowerCase());
         }
+    }
+
+    // Devolucion del auto: pasa el arriendo a FINALIZADO, guarda el kilometraje final y lo
+    // propaga al kilometraje global del auto en car-service.
+    // @Transactional: si car-service rechaza o no responde, se revierte el cambio de estado y el
+    // arriendo queda ACTIVO (no puede quedar finalizado con el kilometraje del auto sin actualizar).
+    @Transactional
+    public RentalResponseDTO finishRental(Long id, FinishRentalRequestDTO dto) {
+        RentalEntity entity = findEntityById(id);
+        enforceValidTransition(entity.getStatus(), RentalState.FINALIZADO);
+
+        // Ficha de admin del auto: funciona aunque el auto se haya dado de baja con el arriendo abierto
+        CarInfoDTO car = fetchCarOrPlaceholder(entity.getCarId());
+        if (car.getMileage() == null) {
+            throw new ServiceCommunicationException(
+                    "No se pudo leer el kilometraje actual del auto " + entity.getCarId());
+        }
+        if (dto.getFinalMileage() < car.getMileage()) {
+            throw new InvalidRentalException(
+                    "El kilometraje final no puede ser menor al actual del auto (" + car.getMileage() + " km)");
+        }
+
+        entity.setStatus(RentalState.FINALIZADO);
+        entity.setFinalMileage(dto.getFinalMileage());
+        RentalEntity saved = rentalRepository.save(entity);
+
+        updateCarMileage(entity.getCarId(), dto.getFinalMileage());
+
+        return toResponseDTO(saved);
     }
 
     public void deleteRental(Long id) {
@@ -374,6 +409,24 @@ public class RentalService {
         return placeholder;
     }
 
+    private void updateCarMileage(Long carId, int mileage) {
+        try {
+            restTemplate.exchange(
+                    carServiceUrl + "/api/cars/{id}/mileage?value={value}",
+                    HttpMethod.PATCH,
+                    serviceRequest(),
+                    Void.class,
+                    carId, mileage);
+        } catch (HttpClientErrorException.NotFound e) {
+            throw new ResourceNotFoundException("Auto no encontrado con id: " + carId);
+        } catch (HttpClientErrorException.BadRequest e) {
+            throw new InvalidRentalException("El kilometraje final no es válido para este auto");
+        } catch (RestClientException e) {
+            throw new ServiceCommunicationException(
+                    "Error al actualizar el kilometraje del auto " + carId + ": " + e.getMessage());
+        }
+    }
+
     private HttpEntity<Void> serviceRequest() {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(serviceTokenProvider.generateServiceToken());
@@ -396,6 +449,7 @@ public class RentalService {
         dto.setStatus(entity.getStatus());
         dto.setTotalPrice(entity.getTotalPrice());
         dto.setDeleted(Boolean.TRUE.equals(entity.getDeleted()));
+        dto.setFinalMileage(entity.getFinalMileage());
         return dto;
     }
 }

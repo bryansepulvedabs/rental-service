@@ -9,4 +9,7 @@ public class CarInfoDTO {
     private String brand;
     private String model;
     private Long dailyRate;
+    // Kilometraje actual del auto: lo necesita la devolucion para validar que el
+    // kilometraje final no sea menor
+    private Integer mileage;
 }

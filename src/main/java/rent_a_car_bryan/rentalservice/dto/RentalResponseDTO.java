@@ -15,4 +15,5 @@ public class RentalResponseDTO {
     private RentalState status;
     private Long totalPrice;
     private Boolean deleted;
+    private Integer finalMileage;
 }

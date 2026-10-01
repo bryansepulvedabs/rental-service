@@ -41,6 +41,10 @@ public class RentalEntity {
     @Column(nullable = false)
     private Long totalPrice;
 
+    // Kilometraje del auto al devolverlo. Nulo mientras el arriendo no se finaliza
+    // (y en los arriendos finalizados antes de existir este campo).
+    private Integer finalMileage;
+
     // columnDefinition con DEFAULT: sin el, ddl-auto=update falla al agregar una
     // columna NOT NULL sobre una tabla que ya tiene filas.
     @Column(nullable = false, columnDefinition = "boolean not null default false")
