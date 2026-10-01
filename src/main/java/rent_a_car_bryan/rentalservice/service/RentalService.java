@@ -14,6 +14,7 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import rent_a_car_bryan.rentalservice.dto.CarInfoDTO;
+import rent_a_car_bryan.rentalservice.dto.RentalDatesRequestDTO;
 import rent_a_car_bryan.rentalservice.dto.RentalRequestDTO;
 import rent_a_car_bryan.rentalservice.dto.RentalResponseDTO;
 import rent_a_car_bryan.rentalservice.dto.UserInfoDTO;
@@ -28,7 +29,10 @@ import rent_a_car_bryan.rentalservice.security.ServiceTokenProvider;
 
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 @Service
 @RequiredArgsConstructor
@@ -36,6 +40,16 @@ public class RentalService {
 
     private static final List<RentalState> BLOCKING_STATES =
             List.of(RentalState.PENDIENTE, RentalState.ACTIVO);
+
+    // Maquina de estados: a que estados se puede pasar desde cada uno.
+    // FINALIZADO y CANCELADO son finales: un arriendo cerrado no se vuelve a abrir.
+    // Para deshacer una eliminacion esta restore(), que es otra cosa.
+    private static final Map<RentalState, Set<RentalState>> ALLOWED_TRANSITIONS = Map.of(
+            RentalState.PENDIENTE, EnumSet.of(RentalState.ACTIVO, RentalState.CANCELADO),
+            RentalState.ACTIVO, EnumSet.of(RentalState.FINALIZADO, RentalState.CANCELADO),
+            RentalState.FINALIZADO, EnumSet.noneOf(RentalState.class),
+            RentalState.CANCELADO, EnumSet.noneOf(RentalState.class)
+    );
 
     private final RentalRepository rentalRepository;
     private final RestTemplate restTemplate;
@@ -125,21 +139,68 @@ public class RentalService {
 
     public RentalResponseDTO updateRentalStatus(Long id, RentalState newStatus) {
         RentalEntity entity = findEntityById(id);
+        // Primero quien puede (403) y despues si la transicion tiene sentido (400)
         enforceStatusChangeAllowed(entity, newStatus);
-
-        boolean wasReleased = !BLOCKING_STATES.contains(entity.getStatus());
-        if (wasReleased && BLOCKING_STATES.contains(newStatus)
-                && rentalRepository.existsOverlappingExcluding(
-                entity.getCarId(), entity.getStartDate(), entity.getEndDate(),
-                BLOCKING_STATES, entity.getId())) {
-            throw new InvalidRentalException(
-                    "No se puede reactivar: el auto ya fue arrendado en esas fechas");
-        }
+        enforceValidTransition(entity.getStatus(), newStatus);
 
         entity.setStatus(newStatus);
         RentalEntity updated = rentalRepository.save(entity);
 
         return toResponseDTO(updated);
+    }
+
+    // Editar las fechas de un arriendo vigente (solo personal: la ruta exige ADMIN o EMPLOYEE).
+    // - PENDIENTE: se pueden mover retiro y devolucion.
+    // - ACTIVO: el auto ya se retiro, asi que solo se puede mover la devolucion (extender o acortar).
+    // - FINALIZADO / CANCELADO: no se editan.
+    // La tarifa diaria se conserva la del arriendo original (total / dias), sin volver a consultar
+    // el auto: si la tarifa del auto cambio despues, este arriendo mantiene el precio pactado.
+    public RentalResponseDTO updateRentalDates(Long id, RentalDatesRequestDTO dto) {
+        RentalEntity entity = findEntityById(id);
+        validateDates(dto.getStartDate(), dto.getEndDate());
+
+        if (!BLOCKING_STATES.contains(entity.getStatus())) {
+            throw new InvalidRentalException("Un arriendo finalizado o cancelado no se puede editar");
+        }
+
+        boolean startChanged = !dto.getStartDate().equals(entity.getStartDate());
+        if (startChanged) {
+            if (entity.getStatus() == RentalState.ACTIVO) {
+                throw new InvalidRentalException(
+                        "El auto ya fue retirado: solo se puede cambiar la fecha de devolución");
+            }
+            if (dto.getStartDate().isBefore(LocalDate.now())) {
+                throw new InvalidRentalException("La fecha de retiro no puede ser anterior a hoy");
+            }
+        }
+
+        if (rentalRepository.existsOverlappingExcluding(
+                entity.getCarId(), dto.getStartDate(), dto.getEndDate(),
+                BLOCKING_STATES, entity.getId())) {
+            throw new InvalidRentalException("El auto ya está arrendado entre esas fechas");
+        }
+
+        long oldDays = ChronoUnit.DAYS.between(entity.getStartDate(), entity.getEndDate());
+        long newDays = ChronoUnit.DAYS.between(dto.getStartDate(), dto.getEndDate());
+        long dailyRate = entity.getTotalPrice() / oldDays;
+
+        entity.setStartDate(dto.getStartDate());
+        entity.setEndDate(dto.getEndDate());
+        entity.setTotalPrice(dailyRate * newDays);
+
+        return toResponseDTO(rentalRepository.save(entity));
+    }
+
+    private void enforceValidTransition(RentalState from, RentalState to) {
+        if (from == to) {
+            throw new InvalidRentalException(
+                    "El arriendo ya está " + from.name().toLowerCase());
+        }
+        if (!ALLOWED_TRANSITIONS.get(from).contains(to)) {
+            throw new InvalidRentalException(
+                    "No se puede pasar un arriendo de " + from.name().toLowerCase()
+                            + " a " + to.name().toLowerCase());
+        }
     }
 
     public void deleteRental(Long id) {

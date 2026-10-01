@@ -5,15 +5,9 @@ import lombok.Data;
 
 import java.time.LocalDate;
 
+// Cuerpo de PATCH /api/rentals/{id}/dates
 @Data
-public class RentalRequestDTO {
-
-    @NotNull(message = "Debes indicar el auto")
-    private Long carId;
-
-    // Opcional: si quien crea es un CLIENT se ignora y se usa el id del token;
-    // si es personal, RentalService.resolveUserId exige que venga.
-    private Long userId;
+public class RentalDatesRequestDTO {
 
     @NotNull(message = "Debes indicar la fecha de inicio")
     private LocalDate startDate;

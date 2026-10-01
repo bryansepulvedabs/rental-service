@@ -1,10 +1,12 @@
 package rent_a_car_bryan.rentalservice.controller;
 
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import rent_a_car_bryan.rentalservice.dto.RentalDatesRequestDTO;
 import rent_a_car_bryan.rentalservice.dto.RentalRequestDTO;
 import rent_a_car_bryan.rentalservice.dto.RentalResponseDTO;
 import rent_a_car_bryan.rentalservice.entity.RentalState;
@@ -21,7 +23,7 @@ public class RentalController {
     private final RentalService rentalService;
 
     @PostMapping
-    public ResponseEntity<RentalResponseDTO> createRental(@RequestBody RentalRequestDTO dto) {
+    public ResponseEntity<RentalResponseDTO> createRental(@Valid @RequestBody RentalRequestDTO dto) {
         return ResponseEntity.status(HttpStatus.CREATED).body(rentalService.createRental(dto));
     }
 
@@ -77,6 +79,15 @@ public class RentalController {
             @PathVariable Long id,
             @RequestParam RentalState newStatus) {
         return ResponseEntity.ok(rentalService.updateRentalStatus(id, newStatus));
+    }
+
+    // Editar las fechas de un arriendo vigente: solo personal (ADMIN o EMPLOYEE),
+    // cae en la regla anyRequest() del SecurityConfig.
+    @PatchMapping("/{id}/dates")
+    public ResponseEntity<RentalResponseDTO> updateRentalDates(
+            @PathVariable Long id,
+            @Valid @RequestBody RentalDatesRequestDTO dto) {
+        return ResponseEntity.ok(rentalService.updateRentalDates(id, dto));
     }
 
     @DeleteMapping("/{id}")
